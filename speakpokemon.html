@@ -58,12 +58,18 @@
 
         // Global state variables
         let currentPokemon = null;
-        let feedbackMessage = ''; // Will be kept empty unless an actual error occurs
+        let feedbackMessage = '';
         let listening = false;
         let showName = false;
         let score = 0;
         let answeredCorrectly = false;
-        let currentPokemonPhonetic = ''; // New variable for phonetic pronunciation
+        let currentPokemonPhonetic = '';
+
+        // Media recording variables
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let audioBlobUrl = '';
+        let isRecording = false;
 
         // Speech Recognition object
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -77,6 +83,10 @@
             recognition.lang = 'en-US';
 
             recognition.onresult = (event) => {
+                // Stop recording when speech recognition provides a result
+                if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
                 const transcript = event.results[0][0].transcript.toLowerCase().trim();
                 checkAnswer(transcript);
                 listening = false;
@@ -85,20 +95,27 @@
 
             recognition.onerror = (event) => {
                 console.error('Speech recognition error:', event.error);
+                if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop(); // Stop recording on error too
+                }
                 if (event.error === 'not-allowed') {
                     feedbackMessage = 'Microphone access denied. Please allow microphone access in your browser settings.';
                 } else if (event.error === 'no-speech') {
-                    feedbackMessage = 'No speech detected.'; // Simplified message
+                    feedbackMessage = 'No speech detected.';
                 } else {
                     feedbackMessage = `Error: ${event.error}. Try again!`;
                 }
                 listening = false;
-                renderApp(); // Re-render on error
+                renderApp();
             };
 
             recognition.onend = () => {
                 listening = false;
-                renderApp(); // Re-render when recognition ends
+                // If recording is still active after recognition ends (e.g., short speech), stop it
+                if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+                renderApp();
             };
         } else {
             feedbackMessage = 'Speech recognition not supported in this browser.';
@@ -127,25 +144,31 @@
                     return result.candidates[0].content.parts[0].text.trim();
                 } else {
                     console.warn("LLM response for pronunciation was unexpected or empty. Returning original name.");
-                    return name; // Fallback to original name
+                    return name;
                 }
             } catch (error) {
                 console.error("Error fetching pronunciation from LLM:", error);
-                return name; // Fallback to original name if LLM call fails
+                return name;
             }
         };
 
         // Function to select and display the next random Pokémon
         const nextPokemon = () => {
-            feedbackMessage = ''; // Ensure feedback is cleared when a new Pokémon loads
+            feedbackMessage = '';
             showName = false;
             answeredCorrectly = false;
-            currentPokemonPhonetic = ''; // Clear phonetic pronunciation for new Pokémon
+            currentPokemonPhonetic = '';
+            // Clear previous recording
+            if (audioBlobUrl) {
+                URL.revokeObjectURL(audioBlobUrl);
+                audioBlobUrl = '';
+            }
+            isRecording = false; // Ensure recording state is reset
 
             const randomIndex = Math.floor(Math.random() * pokemonList.length);
             currentPokemon = pokemonList[randomIndex];
 
-            renderApp(); // Re-render the UI
+            renderApp();
         };
 
         // Function to open YouTube pronunciation link
@@ -156,15 +179,92 @@
             window.open(youtubeSearchUrl, '_blank');
         };
 
-        // Function to start listening for user's speech
-        const startListening = () => {
-            if (recognition && !listening) {
-                listening = true;
-                recognition.start();
-                renderApp(); // Re-render to show "Listening..." state on button
-            } else if (!recognition) {
-                feedbackMessage = 'Speech recognition not available.';
-                renderApp(); // Re-render to show error
+        // Function to start or stop recording and speech recognition
+        const toggleRecordingAndListening = async () => {
+            if (isRecording) {
+                // Stop recording and recognition
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+                if (recognition && listening) {
+                    recognition.stop();
+                }
+                isRecording = false;
+                listening = false; // Ensure listening state is false
+                feedbackMessage = ''; // Clear feedback
+                renderApp();
+            } else {
+                // Start recording and recognition
+                if (!recognition) {
+                    feedbackMessage = 'Speech recognition not available.';
+                    renderApp();
+                    return;
+                }
+
+                // Clear previous recording before starting new one
+                if (audioBlobUrl) {
+                    URL.revokeObjectURL(audioBlobUrl);
+                    audioBlobUrl = '';
+                }
+                audioChunks = []; // Clear chunks for new recording
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm; codecs=opus' });
+
+                    mediaRecorder.ondataavailable = event => {
+                        audioChunks.push(event.data);
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm; codecs=opus' });
+                        audioBlobUrl = URL.createObjectURL(audioBlob);
+                        audioChunks = []; // Clear for next recording
+                        isRecording = false; // Recording officially stopped
+                        renderApp(); // Update UI to show playback button
+                    };
+
+                    mediaRecorder.onerror = (event) => {
+                        console.error('MediaRecorder error:', event.error);
+                        feedbackMessage = `Recording error: ${event.error.name}.`;
+                        isRecording = false;
+                        listening = false;
+                        renderApp();
+                    };
+
+                    mediaRecorder.start();
+                    recognition.start();
+
+                    isRecording = true;
+                    listening = true;
+                    feedbackMessage = ''; // Clear previous messages
+                    renderApp(); // Update UI to show "Listening..." state
+                } catch (err) {
+                    console.error('Microphone access denied:', err);
+                    feedbackMessage = 'Microphone access denied. Please allow microphone access in your browser settings.';
+                    isRecording = false;
+                    listening = false;
+                    renderApp();
+                }
+            }
+        };
+
+        // Function to play the recorded audio
+        const playRecording = () => {
+            if (audioBlobUrl) {
+                const audio = new Audio(audioBlobUrl);
+                audio.play();
+                feedbackMessage = 'Playing your recording...';
+                renderApp();
+                audio.onended = () => {
+                    feedbackMessage = '';
+                    renderApp();
+                };
+                audio.onerror = (e) => {
+                    console.error('Audio playback error:', e);
+                    feedbackMessage = 'Failed to play recording.';
+                    renderApp();
+                };
             }
         };
 
@@ -179,22 +279,21 @@
                 score++;
                 showName = true;
                 answeredCorrectly = true;
-                // Get phonetic pronunciation when correct answer is given
                 getPhoneticPronunciation(currentPokemon.name).then(phonetic => {
                     currentPokemonPhonetic = phonetic;
                     renderApp();
                 });
             } else {
-                // No feedback message for incorrect answer
+                // No specific feedback message for incorrect answer
             }
-            renderApp(); // Re-render to show feedback and updated score/name
+            renderApp();
         };
 
         // Handle image load error, display a placeholder
         const handleImageError = (event) => {
             event.target.src = "https://placehold.co/200x200/cccccc/333333?text=Image+Error";
             feedbackMessage = "Couldn't load Pokémon image. Try again.";
-            renderApp(); // Re-render to show error message
+            renderApp();
         };
 
         // Function to render the entire application UI
@@ -241,31 +340,55 @@
                                 w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
                                 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 hover:shadow-lg active:scale-95
                             "
-                            ${answeredCorrectly ? 'disabled' : ''}
+                            ${answeredCorrectly || isRecording ? 'disabled' : ''}
                         >
                             Open Pronunciation
                         </button>
 
-                        <!-- Say Name Button -->
+                        <!-- Say Name Button (toggles recording/listening) -->
                         <button
                             id="say-name-button"
                             class="
                                 w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
-                                ${listening || answeredCorrectly || !recognition ? 'bg-gradient-to-r from-blue-400 to-blue-500 cursor-not-allowed' : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 hover:shadow-lg active:scale-95'}
+                                ${answeredCorrectly || (isRecording ? 'bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 active:scale-95' : (!recognition ? 'bg-gradient-to-r from-gray-400 to-gray-500 cursor-not-allowed' : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 hover:shadow-lg active:scale-95'))}
                             "
-                            ${listening || answeredCorrectly || !recognition ? 'disabled' : ''}
+                            ${answeredCorrectly || !recognition ? 'disabled' : ''}
                         >
-                            ${listening ? 'Listening...' : 'Say Name'}
+                            ${isRecording ? 'Stop Recording' : 'Say Name'}
                         </button>
+
+                        <!-- Play Recording Button -->
+                        ${audioBlobUrl ? `
+                            <button
+                                id="play-recording-button"
+                                class="
+                                    w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
+                                    bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 hover:shadow-lg active:scale-95
+                                "
+                                ${isRecording ? 'disabled' : ''}
+                            >
+                                Play Recording
+                            </button>
+                        ` : `
+                            <button
+                                class="
+                                    w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
+                                    bg-gradient-to-r from-gray-300 to-gray-400 cursor-not-allowed
+                                "
+                                disabled
+                            >
+                                Play Recording
+                            </button>
+                        `}
 
                         <!-- Reveal Name Button -->
                         <button
                             id="reveal-name-button"
                             class="
                                 w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
-                                ${showName || answeredCorrectly ? 'bg-gradient-to-r from-pink-300 to-pink-400 cursor-not-allowed' : 'bg-gradient-to-r from-pink-500 to-pink-600 hover:from-pink-600 hover:to-pink-700 hover:shadow-lg active:scale-95'}
+                                ${showName || answeredCorrectly || isRecording ? 'bg-gradient-to-r from-pink-300 to-pink-400 cursor-not-allowed' : 'bg-gradient-to-r from-pink-500 to-pink-600 hover:from-pink-600 hover:to-pink-700 hover:shadow-lg active:scale-95'}
                             "
-                            ${showName || answeredCorrectly ? 'disabled' : ''}
+                            ${showName || answeredCorrectly || isRecording ? 'disabled' : ''}
                         >
                             Reveal Name
                         </button>
@@ -280,13 +403,13 @@
                     </div>
                      <!-- Feedback message area (will primarily show only microphone access errors) -->
                     <p class="text-xl md:text-2xl font-semibold mt-6 ${listening ? 'text-blue-600' : 'text-gray-700'}">
-                        ${feedbackMessage}s
+                        ${feedbackMessage}
                     </p>
                 </div>
             `;
             // Add event listeners after rendering the HTML
             document.getElementById('open-pronunciation-button')?.addEventListener('click', openPronunciationLink);
-            document.getElementById('say-name-button')?.addEventListener('click', startListening);
+            document.getElementById('say-name-button')?.addEventListener('click', toggleRecordingAndListening);
             document.getElementById('reveal-name-button')?.addEventListener('click', async () => {
                 showName = true;
                 if (currentPokemon && !currentPokemonPhonetic) {
@@ -299,6 +422,8 @@
             });
             document.getElementById('next-pokemon-button')?.addEventListener('click', nextPokemon);
             document.getElementById('pokemon-image')?.addEventListener('error', handleImageError);
+            // Add event listener for Play Recording button
+            document.getElementById('play-recording-button')?.addEventListener('click', playRecording);
         };
 
         // Initial render when the script loads
