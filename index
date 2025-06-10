@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pokémon Speech Therapy App</title>
+    <!-- Tailwind CSS CDN for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for animations or specific overrides if needed */
+        @keyframes fadeInMoveUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        .animate-fade-in-up {
+            animation: fadeInMoveUp 0.5s ease-out forwards;
+        }
+    </style>
+</head>
+<body class="font-sans">
+    <div id="app" class="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 flex flex-col items-center justify-center p-4 text-gray-800">
+        <!-- Application UI will be rendered here by JavaScript -->
+    </div>
+
+    <script type="text/javascript">
+        // Get the root element for the application
+        const appDiv = document.getElementById('app');
+
+        // Array of Pokémon data: name, their 3-digit number for Serebii.net URL
+        const pokemonList = [
+            { name: 'Bulbasaur', number: '001' },
+            { name: 'Charmander', number: '004' },
+            { name: 'Squirtle', number: '007' },
+            { name: 'Pikachu', number: '025' },
+            { name: 'Jigglypuff', number: '039' },
+            { name: 'Meowth', number: '052' },
+            { name: 'Psyduck', 'number': '054' },
+            { name: 'Snorlax', number: '143' },
+            { name: 'Mewtwo', number: '150' },
+            { name: 'Mew', number: '151' },
+            { name: 'Eevee', number: '133' },
+            { name: 'Gengar', number: '094' },
+            { name: 'Lapras', number: '131' },
+            { name: 'Togepi', number: '175' },
+            { name: 'Wooper', number: '194' },
+            { name: 'Sableye', number: '302' },
+            { name: 'Lucario', number: '448' },
+            { name: 'Zorua', number: '570' },
+            { name: 'Rowlet', number: '722' },
+            { name: 'Mimikyu', number: '778' },
+        ];
+
+        // Global state variables
+        let currentPokemon = null;
+        let feedbackMessage = ''; // Will be kept empty unless an actual error occurs
+        let listening = false;
+        let showName = false;
+        let score = 0;
+        let answeredCorrectly = false;
+        let currentPokemonPhonetic = ''; // New variable for phonetic pronunciation
+
+        // Speech Recognition object
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition = null;
+
+        // Initialize speech recognition if available
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = false;
+            recognition.lang = 'en-US';
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript.toLowerCase().trim();
+                checkAnswer(transcript);
+                listening = false;
+                renderApp(); // Re-render after recognition ends
+            };
+
+            recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                if (event.error === 'not-allowed') {
+                    feedbackMessage = 'Microphone access denied. Please allow microphone access in your browser settings.';
+                } else if (event.error === 'no-speech') {
+                    feedbackMessage = 'No speech detected.'; // Simplified message
+                } else {
+                    feedbackMessage = `Error: ${event.error}. Try again!`;
+                }
+                listening = false;
+                renderApp(); // Re-render on error
+            };
+
+            recognition.onend = () => {
+                listening = false;
+                renderApp(); // Re-render when recognition ends
+            };
+        } else {
+            feedbackMessage = 'Speech recognition not supported in this browser.';
+            console.warn('SpeechRecognition API not supported.');
+        }
+
+        // Function to get phonetic pronunciation from LLM (for 'Reveal Name')
+        const getPhoneticPronunciation = async (name) => {
+            try {
+                const prompt = `Provide a simple, easy-to-understand phonetic pronunciation of "${name}" in English for a child learning speech. Only provide the phonetic text, no extra words or phrases. For example, for 'Pikachu', respond with 'Pee-kah-choo'. For 'Bulbasaur', respond with 'Bul-buh-sor'.`;
+                const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+                const payload = { contents: chatHistory };
+                const apiKey = ""; // Canvas will automatically provide this
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                if (result.candidates && result.candidates.length > 0 &&
+                    result.candidates[0].content && result.candidates[0].content.parts &&
+                    result.candidates[0].content.parts.length > 0) {
+                    return result.candidates[0].content.parts[0].text.trim();
+                } else {
+                    console.warn("LLM response for pronunciation was unexpected or empty. Returning original name.");
+                    return name; // Fallback to original name
+                }
+            } catch (error) {
+                console.error("Error fetching pronunciation from LLM:", error);
+                return name; // Fallback to original name if LLM call fails
+            }
+        };
+
+        // Function to select and display the next random Pokémon
+        const nextPokemon = () => {
+            feedbackMessage = ''; // Ensure feedback is cleared when a new Pokémon loads
+            showName = false;
+            answeredCorrectly = false;
+            currentPokemonPhonetic = ''; // Clear phonetic pronunciation for new Pokémon
+
+            const randomIndex = Math.floor(Math.random() * pokemonList.length);
+            currentPokemon = pokemonList[randomIndex];
+
+            renderApp(); // Re-render the UI
+        };
+
+        // Function to open YouTube pronunciation link
+        const openPronunciationLink = () => {
+            if (!currentPokemon) return;
+            const pokemonName = currentPokemon.name;
+            const youtubeSearchUrl = `https://www.youtube.com/@howtopronouncepokemon/search?query=${encodeURIComponent(pokemonName)}`;
+            window.open(youtubeSearchUrl, '_blank');
+        };
+
+        // Function to start listening for user's speech
+        const startListening = () => {
+            if (recognition && !listening) {
+                listening = true;
+                recognition.start();
+                renderApp(); // Re-render to show "Listening..." state on button
+            } else if (!recognition) {
+                feedbackMessage = 'Speech recognition not available.';
+                renderApp(); // Re-render to show error
+            }
+        };
+
+        // Function to check the recognized speech against the current Pokémon's name
+        const checkAnswer = (transcript) => {
+            if (!currentPokemon) return;
+
+            const pokemonName = currentPokemon.name.toLowerCase().trim();
+            const spokenName = transcript.toLowerCase().trim();
+
+            if (spokenName === pokemonName) {
+                score++;
+                showName = true;
+                answeredCorrectly = true;
+                // Get phonetic pronunciation when correct answer is given
+                getPhoneticPronunciation(currentPokemon.name).then(phonetic => {
+                    currentPokemonPhonetic = phonetic;
+                    renderApp();
+                });
+            } else {
+                // No feedback message for incorrect answer
+            }
+            renderApp(); // Re-render to show feedback and updated score/name
+        };
+
+        // Handle image load error, display a placeholder
+        const handleImageError = (event) => {
+            event.target.src = "https://placehold.co/200x200/cccccc/333333?text=Image+Error";
+            feedbackMessage = "Couldn't load Pokémon image. Try again.";
+            renderApp(); // Re-render to show error message
+        };
+
+        // Function to render the entire application UI
+        const renderApp = () => {
+            appDiv.innerHTML = `
+                <div class="bg-white rounded-3xl shadow-2xl p-6 md:p-8 flex flex-col items-center max-w-lg w-full text-center border-4 border-indigo-300 transform transition-all duration-300 hover:scale-105">
+                    <h1 class="text-4xl md:text-5xl font-extrabold text-indigo-700 mb-6 drop-shadow-md">
+                        Pokémon Talk!
+                    </h1>
+
+                    <!-- Score display -->
+                    <div class="text-2xl font-bold mb-4 text-green-700">
+                        Score: ${score}
+                    </div>
+
+                    <!-- Pokémon Card -->
+                    ${currentPokemon ? `
+                        <div class="bg-purple-100 rounded-2xl p-5 mb-6 border-2 border-purple-300 shadow-lg w-full max-w-xs flex flex-col items-center">
+                            <img
+                                id="pokemon-image"
+                                src="https://www.serebii.net/pokemongo/pokemon/${currentPokemon.number}.png"
+                                alt="${currentPokemon.name}"
+                                class="w-48 h-48 md:w-56 md:h-56 object-contain mb-4 filter drop-shadow-lg"
+                            />
+                            ${showName ? `
+                                <p class="text-3xl md:text-4xl font-bold text-purple-800 animate-fade-in-up">
+                                    ${currentPokemon.name}
+                                </p>
+                                ${currentPokemonPhonetic ? `
+                                    <p class="text-xl md:text-2xl font-semibold text-gray-600 mt-2">
+                                        (${currentPokemonPhonetic})
+                                    </p>
+                                ` : ''}
+                            ` : ''}
+                        </div>
+                    ` : ''}
+
+                    <!-- Action Buttons -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 w-full">
+                        <!-- Open Pronunciation Button -->
+                        <button
+                            id="open-pronunciation-button"
+                            class="
+                                w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
+                                bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 hover:shadow-lg active:scale-95
+                            "
+                            ${answeredCorrectly ? 'disabled' : ''}
+                        >
+                            Open Pronunciation
+                        </button>
+
+                        <!-- Say Name Button -->
+                        <button
+                            id="say-name-button"
+                            class="
+                                w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
+                                ${listening || answeredCorrectly || !recognition ? 'bg-gradient-to-r from-blue-400 to-blue-500 cursor-not-allowed' : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 hover:shadow-lg active:scale-95'}
+                            "
+                            ${listening || answeredCorrectly || !recognition ? 'disabled' : ''}
+                        >
+                            ${listening ? 'Listening...' : 'Say Name'}
+                        </button>
+
+                        <!-- Reveal Name Button -->
+                        <button
+                            id="reveal-name-button"
+                            class="
+                                w-full py-3 px-6 rounded-xl text-white font-bold text-lg shadow-md transition duration-300 ease-in-out
+                                ${showName || answeredCorrectly ? 'bg-gradient-to-r from-pink-300 to-pink-400 cursor-not-allowed' : 'bg-gradient-to-r from-pink-500 to-pink-600 hover:from-pink-600 hover:to-pink-700 hover:shadow-lg active:scale-95'}
+                            "
+                            ${showName || answeredCorrectly ? 'disabled' : ''}
+                        >
+                            Reveal Name
+                        </button>
+
+                        <!-- Next Pokémon Button -->
+                        <button
+                            id="next-pokemon-button"
+                            class="col-span-full w-full py-3 px-6 rounded-xl bg-gradient-to-r from-green-500 to-green-600 text-white font-bold text-lg shadow-md transition duration-300 ease-in-out hover:from-green-600 hover:to-green-700 hover:shadow-lg active:scale-95"
+                        >
+                            Next Pokémon
+                        </button>
+                    </div>
+                     <!-- Feedback message area (will primarily show only microphone access errors) -->
+                    <p class="text-xl md:text-2xl font-semibold mt-6 ${listening ? 'text-blue-600' : 'text-gray-700'}">
+                        ${feedbackMessage}
+                    </p>
+                </div>
+            `;
+            // Add event listeners after rendering the HTML
+            document.getElementById('open-pronunciation-button')?.addEventListener('click', openPronunciationLink);
+            document.getElementById('say-name-button')?.addEventListener('click', startListening);
+            document.getElementById('reveal-name-button')?.addEventListener('click', async () => {
+                showName = true;
+                if (currentPokemon && !currentPokemonPhonetic) {
+                    feedbackMessage = "Getting pronunciation...";
+                    renderApp();
+                    currentPokemonPhonetic = await getPhoneticPronunciation(currentPokemon.name);
+                    feedbackMessage = "";
+                }
+                renderApp();
+            });
+            document.getElementById('next-pokemon-button')?.addEventListener('click', nextPokemon);
+            document.getElementById('pokemon-image')?.addEventListener('error', handleImageError);
+        };
+
+        // Initial render when the script loads
+        window.onload = () => {
+            nextPokemon(); // Set up the first Pokémon and render
+        };
+    </script>
+</body>
+</html>
